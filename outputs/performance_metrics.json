@@ -1,0 +1,17 @@
+{
+  "inference_time": {
+    "mean_ms": 6.295206546783447,
+    "std_ms": 7.05400820646942,
+    "min_ms": 0.0,
+    "max_ms": 19.936561584472656,
+    "median_ms": 1.9170045852661133
+  },
+  "model_size": {
+    "total_mb": 0.05759429931640625,
+    "params_mb": 0.05759429931640625,
+    "buffers_mb": 0.0,
+    "num_parameters": 15098
+  },
+  "meets_latency_requirement": true,
+  "meets_memory_requirement": true
+}

@@ -1,0 +1,14 @@
+{
+  "num_sequences": 4500,
+  "sequence_length": 60,
+  "num_features": 8,
+  "num_normal": 2244,
+  "num_attacks": 2256,
+  "attack_type_distribution": {
+    "normal": 2244,
+    "syn_flood": 561,
+    "udp_flood": 565,
+    "http_flood": 571,
+    "dns_amplification": 559
+  }
+}
