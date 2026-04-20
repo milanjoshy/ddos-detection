@@ -135,39 +135,43 @@ def train_model(config: Config, train_loader, val_loader, checkpoint_path=None):
     print("MODEL TRAINING")
     print("="*80)
 
-    # Check if checkpoint exists
+    # Check if checkpoint exists — try to load, but continue training if incompatible
     best_model_path = Path(config.get('paths.checkpoint_dir')) / 'best_model.pt'
     if best_model_path.exists() and checkpoint_path is None:
-        print(f"\nLoading existing trained model from {best_model_path}")
-        checkpoint = torch.load(best_model_path, map_location=config.get('edge.target_device'), weights_only=False)
+        print(f"\nFound existing trained model at {best_model_path} — attempting to load")
+        try:
+            checkpoint = torch.load(best_model_path, map_location=config.get('edge.target_device'))
 
-        # Initialize model with saved config
-        model_config = checkpoint.get('model_config', {
-            'input_dim': config.get('model.input_dim'),
-            'state_dim': config.get('model.state_dim'),
-            'hidden_dim': config.get('model.hidden_dim'),
-            'num_layers': config.get('model.num_layers'),
-            'dropout': config.get('model.dropout'),
-            'use_attention': config.get('model.use_attention')
-        })
+            # Initialize model with saved config
+            model_config = checkpoint.get('model_config', {
+                'input_dim': config.get('model.input_dim'),
+                'state_dim': config.get('model.state_dim'),
+                'hidden_dim': config.get('model.hidden_dim'),
+                'num_layers': config.get('model.num_layers'),
+                'dropout': config.get('model.dropout'),
+                'use_attention': config.get('model.use_attention')
+            })
 
-        model = DDoSDetector(**model_config)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        model.to(config.get('edge.target_device'))
+            model = DDoSDetector(**model_config)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            model.to(config.get('edge.target_device'))
 
-        # Initialize trainer for evaluation
-        trainer = DDoSTrainer(
-            model=model,
-            device=config.get('edge.target_device'),
-            learning_rate=config.get('training.learning_rate'),
-            weight_decay=config.get('training.weight_decay'),
-            use_focal_loss=config.get('training.use_focal_loss'),
-            focal_alpha=config.get('training.focal_alpha'),
-            focal_gamma=config.get('training.focal_gamma')
-        )
+            # Initialize trainer for evaluation
+            trainer = DDoSTrainer(
+                model=model,
+                device=config.get('edge.target_device'),
+                learning_rate=config.get('training.learning_rate'),
+                weight_decay=config.get('training.weight_decay'),
+                use_focal_loss=config.get('training.use_focal_loss'),
+                focal_alpha=config.get('training.focal_alpha'),
+                focal_gamma=config.get('training.focal_gamma')
+            )
 
-        print("✅ Model loaded successfully - skipping training")
-        return trainer, None  # Return trainer for evaluation, None for history
+            print("✅ Model loaded successfully - skipping training")
+            return trainer, None  # Return trainer for evaluation, None for history
+        except Exception as e:
+            print(f"⚠️  Failed to load existing checkpoint (will train from scratch): {e}")
+            # Fall through to training from scratch
 
     # Initialize model
     print("\nInitializing new model...")

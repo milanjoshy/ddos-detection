@@ -1,8 +1,26 @@
 """
 State Space Model for DDoS Detection in IoT Edge Environments
 
-This module implements a lightweight linear State Space Model (SSM) for
-real-time DDoS attack detection on resource-constrained edge devices.
+This module implements a DDoS detection system using the S5
+(Simplified Structured State Space) model as the sequence backbone.
+
+Backbone:  s5-pytorch  (pip install s5-pytorch)
+           S5Block = S5 operator + LayerNorm + FFN-GLU + residual connection
+           Paper: "Simplified State Space Layers for Sequence Modeling"
+                  Smith, Warrington, Linderman — ICLR 2023 (Oral)
+
+Drop-in change from the original:
+    LinearSSM  →  S5Block (one per layer)
+
+Everything else — AttentionPooling, DDoSDetector heads, QuantizedDDoSDetector,
+all public method signatures, input/output shapes — is unchanged so that
+trainer.py, realtime_detector.py, demo.py, etc. work with zero edits.
+
+Requirements
+------------
+    pip install s5-pytorch          # the S5 / S5Block classes
+    Python >= 3.10                  # s5-pytorch uses match/case
+    PyTorch >= 2.0                  # s5-pytorch uses torch.vmap
 """
 
 import torch
@@ -10,116 +28,18 @@ import torch.nn as nn
 import numpy as np
 from typing import Tuple, Optional, Dict, List
 
-
-class LinearSSM(nn.Module):
-    """
-    Linear State Space Model for temporal sequence modeling.
-    
-    The model follows the continuous-time state space formulation:
-        dx/dt = Ax(t) + Bu(t)
-        y(t) = Cx(t) + Du(t)
-    
-    Discretized for practical implementation on edge devices.
-    """
-    
-    def __init__(self, input_dim: int, state_dim: int, output_dim: int):
-        """
-        Initialize the Linear SSM.
-        
-        Args:
-            input_dim: Dimension of input features (traffic statistics)
-            state_dim: Dimension of hidden state (temporal memory)
-            output_dim: Dimension of output (typically 1 for binary classification)
-        """
-        super().__init__()
-        self.input_dim = input_dim
-        self.state_dim = state_dim
-        self.output_dim = output_dim
-        
-        # State transition matrix A (state_dim x state_dim)
-        # Initialize with diagonal dominance for stability
-        self.A = nn.Parameter(self._initialize_A())
-        
-        # Input matrix B (state_dim x input_dim)
-        self.B = nn.Parameter(torch.randn(state_dim, input_dim) * 0.1)
-        
-        # Output matrix C (output_dim x state_dim)
-        self.C = nn.Parameter(torch.randn(output_dim, state_dim) * 0.1)
-        
-        # Feedforward matrix D (output_dim x input_dim)
-        self.D = nn.Parameter(torch.randn(output_dim, input_dim) * 0.1)
-        
-        # Discretization parameter (learnable time step)
-        self.log_dt = nn.Parameter(torch.zeros(1))
-        
-    def _initialize_A(self) -> torch.Tensor:
-        """Initialize A matrix with diagonal dominance for stability."""
-        A = torch.randn(self.state_dim, self.state_dim) * 0.05
-        # Make diagonal negative for stability (eigenvalues with negative real parts)
-        A.diagonal().copy_(torch.rand(self.state_dim) * -0.5 - 0.5)
-        return A
-        
-    def discretize(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Discretize continuous-time matrices using zero-order hold.
-        
-        Returns:
-            A_bar: Discrete state transition matrix
-            B_bar: Discrete input matrix
-        """
-        dt = torch.exp(self.log_dt).clamp(max=1.0)  # Clamp for numerical stability
-        
-        # Zero-order hold discretization
-        # A_bar = exp(A * dt) ≈ I + A * dt (first-order approximation for efficiency)
-        A_bar = torch.eye(self.state_dim, device=self.A.device) + self.A * dt
-        B_bar = self.B * dt
-        
-        return A_bar, B_bar
-    
-    def forward(self, x: torch.Tensor, hidden: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass through the SSM.
-        
-        Args:
-            x: Input tensor of shape (batch_size, seq_len, input_dim)
-            hidden: Initial hidden state of shape (batch_size, state_dim)
-        
-        Returns:
-            output: Output tensor of shape (batch_size, seq_len, output_dim)
-            hidden: Final hidden state of shape (batch_size, state_dim)
-        """
-        batch_size, seq_len, _ = x.shape
-        
-        # Initialize hidden state if not provided
-        if hidden is None:
-            hidden = torch.zeros(batch_size, self.state_dim, device=x.device)
-        
-        # Discretize the continuous-time system
-        A_bar, B_bar = self.discretize()
-        
-        outputs = []
-        
-        # Process sequence step by step
-        for t in range(seq_len):
-            x_t = x[:, t, :]  # (batch_size, input_dim)
-            
-            # State update: h_t = A_bar @ h_{t-1} + B_bar @ x_t
-            hidden = torch.matmul(hidden, A_bar.T) + torch.matmul(x_t, B_bar.T)
-            
-            # Output: y_t = C @ h_t + D @ x_t
-            y_t = torch.matmul(hidden, self.C.T) + torch.matmul(x_t, self.D.T)
-            
-            outputs.append(y_t)
-        
-        # Stack outputs along sequence dimension
-        output = torch.stack(outputs, dim=1)  # (batch_size, seq_len, output_dim)
-        
-        return output, hidden
+# ---------------------------------------------------------------------------
+# S5 import — the only external dependency that changed
+# ---------------------------------------------------------------------------
+from s5 import S5Block          # S5 operator + LayerNorm + GLU-FFN + residual
 
 
+# ===========================================================================
+# AttentionPooling  (UNCHANGED)
+# ===========================================================================
 class AttentionPooling(nn.Module):
     """Attention-based pooling for sequence aggregation."""
-    
+
     def __init__(self, hidden_dim: int):
         super().__init__()
         self.attention = nn.Sequential(
@@ -127,7 +47,7 @@ class AttentionPooling(nn.Module):
             nn.Tanh(),
             nn.Linear(hidden_dim // 2, 1)
         )
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -135,75 +55,93 @@ class AttentionPooling(nn.Module):
         Returns:
             pooled: (batch_size, hidden_dim)
         """
-        # Compute attention weights
-        attn_weights = self.attention(x)  # (batch_size, seq_len, 1)
+        attn_weights = self.attention(x)                # (B, T, 1)
         attn_weights = torch.softmax(attn_weights, dim=1)
-        
-        # Weighted sum
-        pooled = torch.sum(x * attn_weights, dim=1)  # (batch_size, hidden_dim)
+        pooled = torch.sum(x * attn_weights, dim=1)     # (B, hidden_dim)
         return pooled
 
 
+# ===========================================================================
+# DDoSDetector  — backbone swapped to S5Block
+# ===========================================================================
 class DDoSDetector(nn.Module):
     """
-    Complete DDoS Detection Model using State Space Model.
-    
-    This model processes temporal network traffic statistics and outputs
-    attack probabilities with confidence scores.
+    DDoS Detection Model using S5 (Simplified Structured State Space).
+
+    Architecture per layer:
+        input_proj (only layer 0):  Linear(input_dim -> state_dim)
+        S5Block:                    S5 + LayerNorm + FFN-GLU + residual
+                                    input & output dim = state_dim
+
+    Then the shared classification / confidence / attack-type heads are
+    identical to the original LinearSSM version.
     """
-    
+
     def __init__(
         self,
         input_dim: int = 8,
-        state_dim: int = 32,
-        hidden_dim: int = 64,
-        num_layers: int = 2,
+        state_dim: int = 32,          # d_model for every S5Block
+        hidden_dim: int = 64,         # width of the MLP classification heads
+        num_layers: int = 2,          # number of S5Block layers
         dropout: float = 0.1,
-        use_attention: bool = True
+        use_attention: bool = True,
+        s5_state_dim: int = 64        # internal S5 state dimension (d_state)
     ):
         """
-        Initialize the DDoS Detector.
-        
         Args:
-            input_dim: Number of traffic features per time step
-            state_dim: Dimension of SSM hidden state
-            hidden_dim: Dimension of feedforward layers
-            num_layers: Number of SSM layers
-            dropout: Dropout probability
-            use_attention: Whether to use attention pooling
+            input_dim:      Number of traffic features per time step (8).
+            state_dim:      Dimension flowing through S5 blocks (= d_model).
+            hidden_dim:     Width of the MLP heads after pooling.
+            num_layers:     How many S5Block layers to stack.
+            dropout:        Dropout probability (applied between blocks).
+            use_attention:  Use attention pooling (True) or last-step (False).
+            s5_state_dim:   Internal recurrent state size inside each S5Block
+                            (the "d_state" argument). Larger = more memory,
+                            richer dynamics. 64 is a safe default for edge.
         """
         super().__init__()
-        
+
         self.input_dim = input_dim
         self.state_dim = state_dim
         self.use_attention = use_attention
-        
-        # Input normalization
-        self.input_norm = nn.LayerNorm(input_dim)
-        
-        # Stack of SSM layers
-        self.ssm_layers = nn.ModuleList([
-            LinearSSM(
-                input_dim=input_dim if i == 0 else state_dim,
-                state_dim=state_dim,
-                output_dim=state_dim
-            )
-            for i in range(num_layers)
+
+        # ------------------------------------------------------------------
+        # 1. Input projection  (input_dim -> state_dim)
+        # S5Block requires input & output to share the same dimension
+        # (d_model). Our raw features are 8-d; state_dim is 32.
+        # A single Linear + LayerNorm bridges that gap.
+        # ------------------------------------------------------------------
+        self.input_proj = nn.Sequential(
+            nn.Linear(input_dim, state_dim),
+            nn.LayerNorm(state_dim)
+        )
+
+        # ------------------------------------------------------------------
+        # 2. Stack of S5Blocks
+        #    S5Block(d_model, d_state, bidir=False)
+        #      d_model  – input & output feature dim (= state_dim)
+        #      d_state  – internal recurrent state dim
+        #      bidir    – False -> causal (past only), critical for real-time
+        # ------------------------------------------------------------------
+        self.s5_blocks = nn.ModuleList([
+            S5Block(state_dim, s5_state_dim, bidir=False)
+            for _ in range(num_layers)
         ])
-        
-        # Layer normalization for each SSM layer
-        self.layer_norms = nn.ModuleList([
-            nn.LayerNorm(state_dim) for _ in range(num_layers)
-        ])
-        
-        # Dropout layers
+
+        # Dropout between blocks (S5Block already has its own internal
+        # LayerNorm, so we do NOT add extra LayerNorms here).
         self.dropout = nn.Dropout(dropout)
-        
-        # Attention pooling (optional)
+
+        # ------------------------------------------------------------------
+        # 3. Attention pooling (optional)
+        # ------------------------------------------------------------------
         if use_attention:
             self.attention_pool = AttentionPooling(state_dim)
-        
-        # Classification head
+
+        # ------------------------------------------------------------------
+        # 4. Classification heads  (UNCHANGED from original)
+        # ------------------------------------------------------------------
+        # Binary: is this an attack?
         self.classifier = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
@@ -214,146 +152,147 @@ class DDoSDetector(nn.Module):
             nn.Linear(hidden_dim // 2, 1),
             nn.Sigmoid()
         )
-        
-        # Confidence estimation head
+
+        # Confidence estimation
         self.confidence_head = nn.Sequential(
             nn.Linear(state_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Linear(hidden_dim // 2, 1),
             nn.Sigmoid()
         )
-        
-        # Attack type classifier (multi-class for different DDoS types)
+
+        # Multi-class attack type  (Normal / SYN / UDP / HTTP / DNS-Amp)
         self.attack_type_classifier = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 5)  # 5 attack types: Normal, SYN Flood, UDP Flood, HTTP Flood, DNS Amplification
+            nn.Linear(hidden_dim, 5)
         )
-    
-    def forward(self, x: torch.Tensor, return_confidence: bool = True, return_attack_type: bool = False) -> Dict:
+
+    # ----------------------------------------------------------------------
+    # forward  — only the backbone section changed
+    # ----------------------------------------------------------------------
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_confidence: bool = True,
+        return_attack_type: bool = False
+    ) -> Dict:
         """
-        Forward pass for DDoS detection.
-        
         Args:
-            x: Input tensor of shape (batch_size, seq_len, input_dim)
-            return_confidence: Whether to compute confidence scores
-            return_attack_type: Whether to classify attack type
-        
+            x: (batch_size, seq_len, input_dim)          e.g. (32, 60, 8)
+            return_confidence: include confidence scores in output
+            return_attack_type: include attack-type logits in output
+
         Returns:
-            Dictionary containing predictions and metadata
+            Dictionary with keys matching the original model exactly.
         """
-        # Normalize input
-        x = self.input_norm(x)
-        
-        # Pass through SSM layers
-        hidden = None
-        for i, (ssm, norm) in enumerate(zip(self.ssm_layers, self.layer_norms)):
-            x, hidden = ssm(x, hidden)
-            x = norm(x)
+        # --- 1. Project input features to state_dim -------------------------
+        x = self.input_proj(x)          # (B, T, state_dim)
+
+        # --- 2. Pass through S5Block stack ----------------------------------
+        for block in self.s5_blocks:
+            x = block(x)               # (B, T, state_dim)  — residual is
+                                        #   handled inside S5Block
             x = self.dropout(x)
-        
-        # Get final time step representation
+
+        # --- 3. Pool the sequence into a single vector ----------------------
         if self.use_attention:
-            final_state = self.attention_pool(x)  # (batch_size, state_dim)
+            final_state = self.attention_pool(x)   # (B, state_dim)
         else:
-            final_state = x[:, -1, :]  # (batch_size, state_dim)
-        
-        # Compute attack probabilities for all time steps
-        logits = self.classifier(x)  # (batch_size, seq_len, 1)
-        logits = logits.squeeze(-1)  # (batch_size, seq_len)
-        
-        # Final prediction
-        final_prediction = self.classifier(final_state.unsqueeze(1)).squeeze()  # (batch_size,)
-        
+            final_state = x[:, -1, :]              # (B, state_dim)
+
+        # --- 4. Heads (identical to original) -------------------------------
+        # Per-timestep logits (kept for compatibility with trainer)
+        logits = self.classifier(x).squeeze(-1)    # (B, T)
+
+        # Final single prediction from the pooled state
+        final_pred_logits = self.classifier(
+            final_state.unsqueeze(1)
+        )                                          # (B, 1, 1)
+        final_prediction = final_pred_logits.squeeze(-1).squeeze(-1)  # (B,)
+
         result = {
-            'logits': logits,
+            'logits':           logits,
             'final_prediction': final_prediction,
-            'hidden_state': final_state
+            'hidden_state':     final_state
         }
-        
-        # Compute confidence if requested
+
         if return_confidence:
-            confidence = self.confidence_head(final_state).squeeze(-1)  # (batch_size,)
-            result['confidence'] = confidence
-        
-        # Classify attack type if requested
+            result['confidence'] = self.confidence_head(final_state).squeeze(-1)
+
         if return_attack_type:
-            attack_logits = self.attack_type_classifier(final_state)  # (batch_size, 5)
-            result['attack_type_logits'] = attack_logits
-        
+            result['attack_type_logits'] = self.attack_type_classifier(final_state)
+
         return result
-    
+
+    # ----------------------------------------------------------------------
+    # predict  (UNCHANGED)
+    # ----------------------------------------------------------------------
     def predict(self, x: torch.Tensor, threshold: float = 0.5) -> Dict:
         """
-        Make predictions on input data.
-        
         Args:
-            x: Input tensor of shape (batch_size, seq_len, input_dim)
-            threshold: Classification threshold
-        
+            x: (batch_size, seq_len, input_dim)
+            threshold: classification threshold
+
         Returns:
-            Dictionary with predictions and metadata
+            Dictionary with is_attack, attack_probability, confidence,
+            attack_type, attack_type_probs — same keys as original.
         """
         self.eval()
         with torch.no_grad():
             output = self.forward(x, return_confidence=True, return_attack_type=True)
-            
-            # Binary predictions
-            predictions = (output['final_prediction'] > threshold).long()
-            
-            # Attack type predictions
+
+            predictions  = (output['final_prediction'] > threshold).long()
             attack_types = torch.argmax(output['attack_type_logits'], dim=1)
-            
+
             return {
-                'is_attack': predictions,
-                'attack_probability': output['final_prediction'],
-                'confidence': output['confidence'],
-                'attack_type': attack_types,
-                'attack_type_probs': torch.softmax(output['attack_type_logits'], dim=1)
+                'is_attack':            predictions,
+                'attack_probability':   output['final_prediction'],
+                'confidence':           output['confidence'],
+                'attack_type':          attack_types,
+                'attack_type_probs':    torch.softmax(output['attack_type_logits'], dim=1)
             }
-    
+
+    # ----------------------------------------------------------------------
+    # get_model_size  (UNCHANGED)
+    # ----------------------------------------------------------------------
     def get_model_size(self) -> Dict[str, float]:
         """Calculate model size in MB."""
-        param_size = 0
-        for param in self.parameters():
-            param_size += param.nelement() * param.element_size()
-        
-        buffer_size = 0
-        for buffer in self.buffers():
-            buffer_size += buffer.nelement() * buffer.element_size()
-        
-        size_mb = (param_size + buffer_size) / 1024 / 1024
-        
+        param_size   = sum(p.nelement() * p.element_size() for p in self.parameters())
+        buffer_size  = sum(b.nelement() * b.element_size() for b in self.buffers())
+        size_mb      = (param_size + buffer_size) / 1024 / 1024
+
         return {
-            'total_mb': size_mb,
-            'params_mb': param_size / 1024 / 1024,
-            'buffers_mb': buffer_size / 1024 / 1024,
-            'num_parameters': sum(p.numel() for p in self.parameters())
+            'total_mb':        size_mb,
+            'params_mb':       param_size  / 1024 / 1024,
+            'buffers_mb':      buffer_size / 1024 / 1024,
+            'num_parameters':  sum(p.numel() for p in self.parameters())
         }
 
 
+# ===========================================================================
+# QuantizedDDoSDetector  (UNCHANGED)
+# ===========================================================================
 class QuantizedDDoSDetector(nn.Module):
-    """
-    Quantized version of DDoS Detector for even more efficient edge deployment.
-    """
-    
+    """Quantized wrapper for edge deployment."""
+
     def __init__(self, model: DDoSDetector):
         super().__init__()
         self.model = model
-        
+
     @staticmethod
     def quantize_model(model: DDoSDetector) -> 'QuantizedDDoSDetector':
-        """Apply dynamic quantization to the model."""
+        """Apply INT8 dynamic quantization."""
         quantized_model = torch.quantization.quantize_dynamic(
             model,
             {nn.Linear},
             dtype=torch.qint8
         )
         return QuantizedDDoSDetector(quantized_model)
-    
+
     def forward(self, x: torch.Tensor, **kwargs) -> Dict:
         return self.model(x, **kwargs)
-    
+
     def predict(self, x: torch.Tensor, threshold: float = 0.5) -> Dict:
         return self.model.predict(x, threshold)

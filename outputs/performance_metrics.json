@@ -1,16 +1,16 @@
 {
   "inference_time": {
-    "mean_ms": 6.295206546783447,
-    "std_ms": 7.05400820646942,
-    "min_ms": 0.0,
-    "max_ms": 19.936561584472656,
-    "median_ms": 1.9170045852661133
+    "mean_ms": 25.0614333152771,
+    "std_ms": 6.3824978614793935,
+    "min_ms": 10.143041610717773,
+    "max_ms": 38.576364517211914,
+    "median_ms": 24.341464042663574
   },
   "model_size": {
-    "total_mb": 0.05759429931640625,
-    "params_mb": 0.05759429931640625,
+    "total_mb": 0.121612548828125,
+    "params_mb": 0.121612548828125,
     "buffers_mb": 0.0,
-    "num_parameters": 15098
+    "num_parameters": 27656
   },
   "meets_latency_requirement": true,
   "meets_memory_requirement": true

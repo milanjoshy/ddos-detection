@@ -75,19 +75,16 @@ class DashboardVisualizer:
         
         # Create subplot figure
         fig = make_subplots(
-            rows=3, cols=2,
+            rows=2, cols=2,
             subplot_titles=(
                 'Attack Probability Over Time',
                 'Detection Confidence',
                 'Packet Rate',
-                'Byte Rate',
-                'Attack Type Distribution',
                 'Attack vs Normal Traffic'
             ),
             specs=[
                 [{"secondary_y": False}, {"secondary_y": False}],
-                [{"secondary_y": False}, {"secondary_y": False}],
-                [{"type": "pie"}, {"type": "bar"}]
+                [{"secondary_y": False}, {"type": "bar"}]
             ],
             vertical_spacing=0.12,
             horizontal_spacing=0.12
@@ -137,32 +134,7 @@ class DashboardVisualizer:
             ),
             row=2, col=1
         )
-        
-        # Byte Rate
-        fig.add_trace(
-            go.Scatter(
-                x=times,
-                y=list(self.byte_rates),
-                mode='lines',
-                name='Byte Rate',
-                line=dict(color='#F38181', width=2),
-                fill='tozeroy'
-            ),
-            row=2, col=2
-        )
-        
-        # Attack Type Distribution (Pie)
-        attack_type_counts = pd.Series(self.attack_types).value_counts()
-        fig.add_trace(
-            go.Pie(
-                labels=attack_type_counts.index,
-                values=attack_type_counts.values,
-                hole=0.4,
-                marker=dict(colors=['#4ECDC4', '#FF6B6B', '#95E1D3', '#F38181', '#FFE66D'])
-            ),
-            row=3, col=1
-        )
-        
+
         # Attack vs Normal (Bar)
         attack_counts = pd.Series(self.is_attacks).value_counts()
         fig.add_trace(
@@ -173,21 +145,19 @@ class DashboardVisualizer:
                 text=[attack_counts.get(False, 0), attack_counts.get(True, 0)],
                 textposition='auto'
             ),
-            row=3, col=2
+            row=2, col=2
         )
         
         # Update layout
         fig.update_xaxes(title_text="Time", row=1, col=1)
         fig.update_xaxes(title_text="Time", row=1, col=2)
         fig.update_xaxes(title_text="Time", row=2, col=1)
-        fig.update_xaxes(title_text="Time", row=2, col=2)
-        fig.update_xaxes(title_text="Traffic Type", row=3, col=2)
-        
+        fig.update_xaxes(title_text="Traffic Type", row=2, col=2)
+
         fig.update_yaxes(title_text="Probability", row=1, col=1)
         fig.update_yaxes(title_text="Confidence", row=1, col=2)
         fig.update_yaxes(title_text="Packets/sec", row=2, col=1)
-        fig.update_yaxes(title_text="Bytes/sec", row=2, col=2)
-        fig.update_yaxes(title_text="Count", row=3, col=2)
+        fig.update_yaxes(title_text="Count", row=2, col=2)
         
         fig.update_layout(
             height=1000,
@@ -402,7 +372,7 @@ def create_streamlit_dashboard():
         st.markdown("---")
 
         st.header("System Info")
-        st.info("Model: Linear SSM")
+        st.info("Model: S5")
         st.info("Device: CPU")
         mode_text = "Simulated" if st.session_state.live_running else ("Live Capture" if st.session_state.live_capture_running else "Inactive")
         st.info(f"Mode: {mode_text}")

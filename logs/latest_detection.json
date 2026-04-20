@@ -1,0 +1,1 @@
+{"timestamp": "2026-04-20T18:37:11.350913", "device_id": "ESP32_Edge_001", "is_attack": false, "attack_probability": 0.007275092881172895, "confidence": 0.007275092881172895, "packet_rate": 5462.5, "byte_rate": 4133.489, "syn_ratio": 0.29263, "unique_src_ips": 50, "tcp_count": 7354, "udp_count": 7275}
